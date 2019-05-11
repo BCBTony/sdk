@@ -1,11 +1,10 @@
 package socket
 
 import (
-	"common/jsoniter"
 	"bufio"
+	"common/jsoniter"
 	"encoding/binary"
 	"io"
-	"net"
 )
 
 type Request struct {
@@ -25,8 +24,9 @@ type Response struct {
 }
 
 type ReqResp struct {
-	Index    uint64
-	RespChan chan *Response
+	Index     uint64
+	RespChan  chan *Response
+	CloseChan chan error
 }
 
 const (
@@ -91,7 +91,7 @@ func encodeVarint(w io.Writer, i int64) (err error) {
 	return
 }
 
-func serverRecover(conn net.Conn, req *Request) {
+func serverRecover(w *bufio.Writer, req *Request) {
 	if err := recover(); err != nil {
 		msg := ""
 		if errInfo, ok := err.(error); ok {
@@ -107,7 +107,7 @@ func serverRecover(conn net.Conn, req *Request) {
 		resp.Log = msg
 		resp.Result.Index = req.Index
 		resp.Result.Method = req.Method
-		wErr := writeMessage(req, conn)
+		wErr := writeMessage(req, w)
 		if wErr == nil {
 			// 继续往上传递
 			panic(err)

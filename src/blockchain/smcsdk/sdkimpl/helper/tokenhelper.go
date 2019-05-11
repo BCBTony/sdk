@@ -75,7 +75,7 @@ func (th *TokenHelper) RegisterToken(
 		types.ErrInvalidParameter, "This contract never defined standard transfer method")
 
 	// check sender
-	sdk.RequireOwner(th.smc)
+	sdk.RequireOwner()
 
 	// check contract's token
 	sdk.Require(th.smc.Message().Contract().Token() == "",
@@ -122,6 +122,9 @@ func (th *TokenHelper) RegisterToken(
 	ownerAcct.(*object.Account).SetBalanceOfToken(token.Address(), token.TotalSupply())
 	ownerAcct.(*object.Account).AddAccountTokenKey(std.KeyOfAccountToken(ownerAcct.Address(), tokenAddr))
 
+	// update all token list
+	th.updateAllTokenList(tokenAddr)
+
 	// fire event of NewToken
 	th.smc.Helper().ReceiptHelper().Emit(
 		std.NewToken{
@@ -161,7 +164,7 @@ func (th *TokenHelper) Token() sdk.IToken {
 
 // TokenOfAddress get token with address
 func (th *TokenHelper) TokenOfAddress(tokenAddr types.Address) sdk.IToken {
-	sdk.RequireAddress(th.smc, tokenAddr)
+	sdk.RequireAddress(tokenAddr)
 
 	return th.tokenOfAddress(tokenAddr)
 }
@@ -268,4 +271,23 @@ func (th *TokenHelper) tokenAddressOfSymbol(symbol string) types.Address {
 	key := std.KeyOfTokenWithSymbol(symbol)
 
 	return *(th.smc.(*sdkimpl.SmartContract).LlState().McGetEx(key, new(types.Address)).(*types.Address))
+}
+
+func (th *TokenHelper) updateAllTokenList(tokenAddr types.Address) {
+	key := std.KeyOfAllToken()
+
+	llState := th.smc.(*sdkimpl.SmartContract).LlState()
+
+	allTokens := make([]types.Address, 0)
+	allTokens = *llState.GetEx(key, &allTokens).(*[]types.Address)
+
+	for _, token := range allTokens {
+		if token == tokenAddr {
+			return
+		}
+	}
+
+	allTokens = append(allTokens, tokenAddr)
+
+	llState.Set(key, allTokens)
 }

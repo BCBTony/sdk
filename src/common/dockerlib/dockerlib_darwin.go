@@ -1,11 +1,17 @@
 package dockerlib
 
 import (
+	cryptorand "crypto/rand"
+	"encoding/hex"
+	"errors"
+	"io"
 	"net"
+	"strconv"
 	"strings"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
@@ -16,6 +22,7 @@ import (
 // DockerLib 是我們自定義的 Docker API 的 Wrapper
 type DockerLib struct {
 	logger log.Logger
+	prefix string
 }
 
 // GetMyIntranetIP 獲得本機局網網卡 IP，如有多個，取第一個
@@ -43,7 +50,8 @@ func (l *DockerLib) GetDockerHubIP() string {
 		NeedWait:   true,
 		NeedRemove: true,
 	}
-	if !l.Run("alpine:latest", "", &params) {
+	ok, _ := l.Run("alpine:latest", "", &params)
+	if !ok {
 		return ""
 	}
 	listStr := strings.Split(params.FirstOutput, " ")
@@ -54,24 +62,36 @@ func (l *DockerLib) GetDockerHubIP() string {
 }
 
 // Run 運行 Docker 容器，執行某個功能。由於無法直接獲知Docker內Service的啓動狀態，請參考test文件中的處理辦法，或者在Service啓動的時候主動回調
-func (l *DockerLib) Run(dockerImageName, containerName string, params *DockerRunParams) bool {
-	l.logger.Info("DockerLib Run", "image", dockerImageName, "containerName", containerName, "params", params)
+func (l *DockerLib) Run(dockerImageName, containerName string, params *DockerRunParams) (bool, error) {
+	containerName = l.generalContainerName(containerName)
+	l.logger.Debug("DockerLib Run", "image", dockerImageName, "containerName", containerName, "params", params)
 	ctx := context.Background()
 	cli, err := client.NewEnvClient()
 	if err != nil {
 		l.logger.Warn("DockerLib Run NewEnvClient Error:", "err", err)
-		return false
+		return false, errors.New("DockerLib Run NewEnvClient Error:" + err.Error())
 	}
 
-	if !l.ensureImage(ctx, cli, dockerImageName) {
-		return false
+	if params.NeedPull {
+		// pull image，三次机会，还不成功可以手动获取
+		imageOK := false
+		for i := 0; i < 3; i++ {
+			imageOK, err = l.ensureImage(ctx, cli, dockerImageName)
+			if imageOK {
+				break
+			} else {
+				continue
+			}
+		}
+		if !imageOK {
+			return false, err
+		}
 	}
-
 	resp, err := cli.ContainerCreate(ctx,
 		&container.Config{
 			Image:        dockerImageName,
 			Cmd:          params.Cmd,
-			Tty:          true,
+			Tty:          params.NeedOut,
 			Env:          params.Env,
 			WorkingDir:   params.WorkDir,
 			ExposedPorts: assemblePortSet(params),
@@ -82,23 +102,23 @@ func (l *DockerLib) Run(dockerImageName, containerName string, params *DockerRun
 		}, nil, containerName)
 	if err != nil {
 		l.logger.Warn("DockerLib Run ContainerCreate Error:", "err", err)
-		return false
+		return false, errors.New("DockerLib Run ContainerCreate Error:" + err.Error())
 	}
 
 	if err := cli.ContainerStart(ctx, resp.ID, types.ContainerStartOptions{}); err != nil {
 		l.logger.Warn("DockerLib Run ContainerStart Error:", "err", err)
-		return false
+		return false, errors.New("DockerLib Run ContainerStart Error:" + err.Error())
 	}
 
 	if params.NeedWait {
 		if _, err = cli.ContainerWait(ctx, resp.ID); err != nil {
 			l.logger.Warn("DockerLib Run ContainerWait Error:", "err", err)
-			return false
+			return false, errors.New("DockerLib Run ContainerWait Error:" + err.Error())
 		}
 	}
 
 	if !l.feedBack(ctx, cli, resp.ID, params) {
-		return false
+		return false, errors.New("DockerLib Run feedBack Error")
 	}
 
 	if params.NeedRemove {
@@ -108,7 +128,7 @@ func (l *DockerLib) Run(dockerImageName, containerName string, params *DockerRun
 		}
 	}
 
-	return true
+	return true, nil
 }
 
 func (l *DockerLib) feedBack(ctx context.Context, cli *client.Client, containerID string, params *DockerRunParams) bool {
@@ -121,7 +141,7 @@ func (l *DockerLib) feedBack(ctx context.Context, cli *client.Client, containerI
 
 		byt := make([]byte, 3000)
 		n, err := out.Read(byt)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			l.logger.Warn("DockerLib Run Read From ContainerLogs cause ERROR:", "err", err)
 		}
 		if n < 0 {
@@ -129,7 +149,7 @@ func (l *DockerLib) feedBack(ctx context.Context, cli *client.Client, containerI
 		} else if n == 0 {
 			params.FirstOutput = ""
 		} else {
-			params.FirstOutput = string(byt)
+			params.FirstOutput = string(byt[:n])
 		}
 	}
 	return true
@@ -171,36 +191,42 @@ func assembleMounts(params *DockerRunParams) []mount.Mount {
 	return mounts
 }
 
-func (l *DockerLib) ensureImage(ctx context.Context, cli *client.Client, imageName string) bool {
+func (l *DockerLib) ensureImage(ctx context.Context, cli *client.Client, imageName string) (bool, error) {
 	images, err := cli.ImageList(ctx, types.ImageListOptions{})
 	if err != nil {
 		l.logger.Warn("DockerLib Run ImageList Error:", "err", err)
-		return false
+		return false, errors.New("DockerLib Run ImageList Error:" + err.Error())
 	}
 
 	if notExists(images, imageName) {
 		p, err := cli.ImagePull(ctx, imageName, types.ImagePullOptions{})
-		defer p.Close()
+		defer func() {
+			if p != nil {
+				if e := p.Close(); e != nil {
+					l.logger.Warn(e.Error())
+				}
+			}
+		}()
 		if err != nil {
 			l.logger.Warn("DockerLib Run ImagePull Error:", "err", err)
-			return false
+			return false, errors.New("DockerLib Run ImagePull Error:" + err.Error())
 		}
 
 		byt := make([]byte, 500)
 		for {
-			_, err := p.Read(byt)
-			if err != nil {
+			n, err := p.Read(byt)
+			if err != nil && err != io.EOF {
 				l.logger.Info("DockerLib ImagePull can't Read output", "err", err)
 				break
 			} else {
 				if strings.Contains(string(byt), "Downloaded") || strings.Contains(string(byt), "up to date") {
-					l.logger.Debug("DockerLib ImagePull:", "result", string(byt))
+					l.logger.Debug("DockerLib ImagePull:", "result", string(byt[:n]))
 					break
 				}
 			}
 		}
 	}
-	return true
+	return true, nil
 }
 
 func notExists(images []types.ImageSummary, imageName string) bool {
@@ -222,6 +248,7 @@ func notExists(images []types.ImageSummary, imageName string) bool {
 
 // Kill 殺死一個 Docker 容器，並且清理現場
 func (l *DockerLib) Kill(containerName string) bool {
+	containerName = l.generalContainerName(containerName)
 	ctx := context.Background()
 	cli, err := client.NewEnvClient()
 	if err != nil {
@@ -231,7 +258,7 @@ func (l *DockerLib) Kill(containerName string) bool {
 
 	containerID := l.getContainerIDByName(ctx, cli, containerName)
 	if containerID == "" {
-		l.logger.Warn("No such containerName:", "name", containerName)
+		l.logger.Debug("No such containerName:", "name", containerName)
 		return true // 木有的情況也返回 true 吧，就省了 remove 了
 	}
 
@@ -270,6 +297,7 @@ func (l *DockerLib) getContainerIDByName(ctx context.Context, cli *client.Client
 
 // Status 查詢一個容器的狀態
 func (l *DockerLib) Status(containerName string) bool {
+	containerName = l.generalContainerName(containerName)
 	ctx := context.Background()
 	cli, err := client.NewEnvClient()
 	if err != nil {
@@ -307,7 +335,7 @@ func (l *DockerLib) Reset(prefix string) bool {
 		return false
 	}
 
-	containerList, err := cli.ContainerList(ctx, types.ContainerListOptions{})
+	containerList, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true})
 	if err != nil {
 		l.logger.Warn("DockerLib Reset ContainerList cause ERROR:", "err", err)
 		return false
@@ -316,14 +344,16 @@ func (l *DockerLib) Reset(prefix string) bool {
 	var idList []string
 	for _, c := range containerList {
 		for _, name := range c.Names {
-			if strings.HasPrefix(name, prefix) {
+			if strings.HasPrefix(name[1:], prefix) {
 				idList = append(idList, c.ID)
 				break
 			}
 		}
 	}
 	for _, id := range idList {
-		l.killByID(ctx, cli, id)
+		if ok := l.killByID(ctx, cli, id); !ok {
+			return false
+		}
 	}
 	return true
 }
@@ -362,4 +392,44 @@ func mapIP(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// SetPrefix set container name's prefix
+func (l *DockerLib) SetPrefix(p string) {
+	l.prefix = p
+}
+
+func (l *DockerLib) generalContainerName(name string) string {
+	if name != "" {
+		return l.prefix + name
+	} else {
+		n := l.prefix + generateID(cryptorand.Reader)
+		return n
+	}
+}
+func generateID(r io.Reader) string {
+	b := make([]byte, 32)
+	for {
+		if _, err := io.ReadFull(r, b); err != nil {
+			panic(err) // This shouldn't happen
+		}
+		id := hex.EncodeToString(b)
+		// if we try to parse the truncated for as an int and we don't have
+		// an error then the value is all numeric and causes issues when
+		// used as a hostname. ref #3869
+		if _, err := strconv.ParseInt(TruncateID(id), 10, 64); err == nil {
+			continue
+		}
+		return id
+	}
+}
+
+func TruncateID(id string) string {
+	if i := strings.IndexRune(id, ':'); i >= 0 {
+		id = id[i+1:]
+	}
+	if len(id) > 12 {
+		id = id[:12]
+	}
+	return id
 }

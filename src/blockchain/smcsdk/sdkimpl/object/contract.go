@@ -44,8 +44,8 @@ func (c *Contract) CodeHash() types.Hash { return c.ct.CodeHash }
 // EffectHeight get contract's effectHeight
 func (c *Contract) EffectHeight() int64 { return c.ct.EffectHeight }
 
-// LoseEffect get contract's loseEffect
-func (c *Contract) LoseEffect() int64 { return c.ct.LoseEffect }
+// LoseHeight get contract's loseEffect
+func (c *Contract) LoseHeight() int64 { return c.ct.LoseHeight }
 
 // KeyPrefix get contract's keyPrefix
 func (c *Contract) KeyPrefix() string { return c.ct.KeyPrefix }
@@ -55,6 +55,9 @@ func (c *Contract) Methods() []std.Method { return c.ct.Methods }
 
 // Interfaces get contract's interfaces
 func (c *Contract) Interfaces() []std.Method { return c.ct.Interfaces }
+
+// Mine get contract's mine method
+func (c *Contract) Mine() []std.Method { return c.ct.Mine }
 
 // Token get contract's token
 func (c *Contract) Token() types.Address { return c.ct.Token }
@@ -70,10 +73,10 @@ func (c *Contract) StdContract() *std.Contract { return &c.ct }
 
 // SetOwner set contract's owner
 func (c *Contract) SetOwner(newOwner types.Address) {
-	sdk.RequireAddress(c.smc, newOwner)
+	sdk.RequireAddress(newOwner)
 
 	// 判断sender是否有修改的权限
-	sdk.RequireOwner(c.smc)
+	sdk.RequireOwner()
 
 	sdk.Require(newOwner != c.Address(),
 		types.ErrInvalidParameter, "newOwner address cannot be contract address")

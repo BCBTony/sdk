@@ -1,6 +1,8 @@
 package mydice2win
 
 import (
+	"blockchain/smcsdk/sdk/forx"
+	"blockchain/smcsdk/sdk/std"
 	"encoding/hex"
 
 	"blockchain/smcsdk/sdk"
@@ -15,7 +17,7 @@ import (
 //@:contract:mydice2win
 //@:version:1.0
 //@:organization:orgBtjfCSPCAJ84uQWcpNr74NLMWYm5SXzer
-//@:author:2b6cab2f53a83f2d08807010533bc53785edfda0aed55028336914ccebadbc94
+//@:author:75d01c5b088ed5f9c3b008747d99040b785365a473d9a03414033239ec88f719
 type Dice2Win struct {
 	sdk sdk.ISmartContract
 
@@ -28,7 +30,7 @@ type Dice2Win struct {
 	//@:public:store:cache
 	lockedAmount map[string]bn.Number // key = token name
 
-	//@:public:store:cache
+	//@:public:store
 	settings *Settings
 
 	//@:public:store:cache
@@ -38,7 +40,7 @@ type Dice2Win struct {
 //@:public:receipt
 type receipt interface {
 	emitSetSecretSigner(newSecretSigner types.PubKey)
-	emitSetSettings(tokenNames []string, minBet, maxBet, maxProfit, feeRatio, feeMinimum, sendToCltRatio, betExpirationBlocks int64)
+	emitSetSettings(tokenNames map[string]struct{}, minBet, maxBet, maxProfit, feeRatio, feeMinimum, sendToCltRatio, betExpirationBlocks int64)
 	emitSetRecvFeeInfos(infos []RecvFeeInfo)
 	emitWithdrawFunds(tokenName string, beneficiary types.Address, withdrawAmount bn.Number)
 	emitPlaceBet(tokenName string, gambler types.Address, amount, betMask, possibleWinAmount bn.Number, modulo, commitLastBlock int64, commit, signData []byte, refAddress types.Address)
@@ -51,7 +53,8 @@ type receipt interface {
 func (dw *Dice2Win) InitChain() {
 	// init data
 	settings := Settings{}
-	settings.TokenNames = []string{dw.sdk.Helper().GenesisHelper().Token().Name()}
+	settings.TokenNames = make(map[string]struct{})
+	settings.TokenNames[dw.sdk.Helper().GenesisHelper().Token().Name()] = struct{}{}
 	settings.MaxProfit = 2E12
 	settings.MaxBet = 2E10
 	settings.MinBet = 1E8
@@ -64,11 +67,31 @@ func (dw *Dice2Win) InitChain() {
 	dw._setLockedAmount(dw.sdk.Helper().GenesisHelper().Token().Name(), bn.N(0))
 }
 
+// UpdateChain - construct function
+//@:constructor
+func (dw *Dice2Win) UpdateChain() {
+	// update data
+	settings := dw._settings()
+	settings.BetExpirationBlocks = 100
+
+	dw._setSettings(settings)
+}
+
+// Mine - construct mine function
+//@:public:mine
+func (dw *Dice2Win) Mine() {
+	// update data
+	settings := dw._settings()
+	settings.BetExpirationBlocks = 100
+
+	dw._setSettings(settings)
+}
+
 // SetSecretSigner - Set the secret signer
 //@:public:method:gas[500]
 func (dw *Dice2Win) SetSecretSigner(newSecretSigner types.PubKey) {
 
-	sdk.RequireOwner(dw.sdk)
+	sdk.RequireOwner()
 	sdk.Require(len(newSecretSigner) == 32,
 		types.ErrInvalidParameter, "length of newSecretSigner must be 32 bytes")
 
@@ -83,15 +106,17 @@ func (dw *Dice2Win) SetSecretSigner(newSecretSigner types.PubKey) {
 //@:public:method:gas[500]
 func (dw *Dice2Win) SetSettings(newSettingsStr string) {
 
-	sdk.RequireOwner(dw.sdk)
+	sdk.RequireOwner()
 
 	//只有在全部结算完成，退款完成后，才能设置settings
 	settings := dw._settings()
-	for _, tokenName := range settings.TokenNames {
-		lockedAmount := dw._lockedAmount(tokenName)
+	forx.Range(settings.TokenNames, func(k string, v struct{}) bool {
+		lockedAmount := dw._lockedAmount(k)
 		sdk.Require(lockedAmount.CmpI(0) == 0,
 			types.ErrUserDefined, "only lockedAmount is zero that can do SetSettings()")
-	}
+
+		return true
+	})
 
 	newSettings := new(Settings)
 	err := jsoniter.Unmarshal([]byte(newSettingsStr), newSettings)
@@ -117,7 +142,7 @@ func (dw *Dice2Win) SetSettings(newSettingsStr string) {
 //@:public:method:gas[500]
 func (dw *Dice2Win) SetRecvFeeInfos(recvFeeInfosStr string) {
 
-	sdk.RequireOwner(dw.sdk)
+	sdk.RequireOwner()
 
 	infos := make([]RecvFeeInfo, 0)
 	err := jsoniter.Unmarshal([]byte(recvFeeInfosStr), &infos)
@@ -134,7 +159,7 @@ func (dw *Dice2Win) SetRecvFeeInfos(recvFeeInfosStr string) {
 //@:public:method:gas[500]
 func (dw *Dice2Win) WithdrawFunds(tokenName string, beneficiary types.Address, withdrawAmount bn.Number) {
 
-	sdk.RequireOwner(dw.sdk)
+	sdk.RequireOwner()
 	sdk.Require(withdrawAmount.CmpI(0) > 0,
 		types.ErrInvalidParameter, "withdrawAmount must be larger than zero")
 
@@ -181,14 +206,18 @@ func (dw *Dice2Win) PlaceBet(betMask bn.Number, modulo, commitLastBlock int64, c
 
 	// get transfer receipt and save value
 	settings := dw._settings()
-	for _, tkName := range settings.TokenNames {
-		transferReceipt := dw.sdk.Message().GetTransferToMe(tkName)
-		if transferReceipt != nil {
-			tokenName = tkName
-			amount = transferReceipt.Value
-			break
+	transferReceipts := dw.sdk.Message().GetTransferToMe()
+	forx.Range(transferReceipts, func(i int, receipt *std.Transfer) bool {
+		token := dw.sdk.Helper().TokenHelper().TokenOfAddress(receipt.Token)
+		if _, ok := settings.TokenNames[token.Name()]; ok {
+			tokenName = token.Name()
+			amount = receipt.Value
+			return forx.Break
 		}
-	}
+
+		return true
+	})
+
 	sdk.Require(tokenName != "" && amount.CmpI(0) > 0,
 		types.ErrUserDefined, "Must transfer tokens to me before place a bet")
 	sdk.Require(amount.CmpI(settings.MinBet) >= 0 && amount.CmpI(settings.MaxBet) <= 0,
