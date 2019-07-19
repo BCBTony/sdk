@@ -101,6 +101,15 @@ type ContractWithEffectHeight struct {
 	IsUpgrade    bool          `json:"isUpgrade"`
 }
 
+// MineContract contract address and height of mine
+type MineContract struct {
+	MineHeight int64         `json:"mineHeight"` // 开发挖矿高度
+	Address    types.Address `json:"address"`    // 合约地址
+}
+
+// KeyOfMineContracts key of all MineContract list
+func KeyOfMineContracts() string { return "/contract/mines" }
+
 // KeyOfContractWithEffectHeight the access key for effective contract with height
 // data for this key refer ContractWithEffectHeight
 func KeyOfContractWithEffectHeight(height string) string { return "/" + height }
@@ -129,12 +138,9 @@ func KeyOfGenesisContractAddrList() string { return "/genesis/contracts" }
 
 // GetGenesisContractAddr get genesis contract addr
 func GetGenesisContractAddr(chainID string) string {
-	if chainID != "" {
-		crypto.SetChainId(chainID)
-	}
 	pubKey := [32]byte{}
 	p := crypto.PubKeyEd25519FromBytes(pubKey[:])
-	addr := p.Address()
+	addr := p.Address(chainID)
 	return addr
 }
 

@@ -55,14 +55,12 @@ func (ballot *Ballot) Init(proposalNames []string) {
 
 	// For each of the provided proposal names,
 	// create a new 'Proposal' object and add it to the end of the array
-	forx.Range(proposalNames, func(i int, pName string) bool {
+	forx.Range(proposalNames, func(i int, pName string) {
 		proposals = append(proposals,
 			Proposal{
 				name:      pName,
 				voteCount: 0,
 			})
-
-		return true
 	})
 	ballot._setProposals(proposals)
 }
@@ -105,15 +103,13 @@ func (ballot *Ballot) Delegate(to types.Address) {
 	toVoter := ballot._voters(to)
 	forx.Range(func() bool {
 		return toVoter.delegate != ""
-	}, func(i int) bool {
+	}, func(i int) {
 		to = toVoter.delegate
 		toVoter = ballot._voters(to)
 
 		// We found a loop in the delegation, not allowed.
 		sdk.Require(to != sender,
 			types.ErrUserDefined, "Found loop in delegation.")
-
-		return true
 	})
 
 	sendVoter.voted = true
@@ -161,13 +157,11 @@ func (ballot *Ballot) WinningProposal() (winningProposal uint) {
 	var winningVoteCount uint
 
 	proposals := ballot._proposals()
-	forx.Range(proposals, func(i int, proposal Proposal) bool {
+	forx.Range(proposals, func(i int, proposal Proposal) {
 		if proposal.voteCount > winningVoteCount {
 			winningVoteCount = proposal.voteCount
 			winningProposal = uint(i)
 		}
-
-		return true
 	})
 	return
 }

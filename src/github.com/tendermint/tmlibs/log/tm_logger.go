@@ -4,13 +4,17 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
 )
 
+const lengthOfChanLogInfoBuffer = 10000
+
 type logInfo struct {
+	time        string
 	level       string
 	msg         string
 	keyvals     []interface{}
@@ -34,9 +38,9 @@ type giLogger struct {
 	timeZone         string
 	fileName         string
 	logFile          *os.File
-	caStop           chan bool     //用于控制异步写线程
-	caStopped        chan bool     //用于控制异步写线程
-	cf               chan *logInfo //用于控制异步构造日志文本串
+	caStop           chan bool    //用于控制异步写线程
+	caStopped        chan bool    //用于控制异步写线程
+	cf               chan logInfo //用于控制异步构造日志文本串
 	mutex            *sync.Mutex
 }
 
@@ -61,7 +65,7 @@ func NewTMLogger(path, module string) Loggerf {
 		logFile:          nil,
 		caStop:           make(chan bool, 1),
 		caStopped:        make(chan bool, 1),
-		cf:               make(chan *logInfo, 10000),
+		cf:               make(chan logInfo, lengthOfChanLogInfoBuffer),
 		mutex:            new(sync.Mutex),
 		withThreadID:     true,
 	}
@@ -238,21 +242,21 @@ func GetGID() string {
 	return string(b)
 }
 
-func (log *giLogger) genLogText(goroutineID, level, msg string, keyvals []interface{}) (logText string) {
+func (log *giLogger) genLogText(strTime, goroutineID, level, msg string, keyvals []interface{}) (logText string) {
 	var kvs []interface{}
 	var tag string
 
 	if goroutineID != "" {
 		tag = fmt.Sprintf(
 			"%v[%v][%-5v][%5s] ",
-			time.Now().UTC().Format(DATETIMEFORMAT),
+			strTime,
 			log.timeZone,
 			level,
 			goroutineID)
 	} else {
 		tag = fmt.Sprintf(
 			"%v[%v][%-5v] ",
-			time.Now().UTC().Format(DATETIMEFORMAT),
+			strTime,
 			log.timeZone,
 			level)
 	}
@@ -280,18 +284,18 @@ func (log *giLogger) genLogText(goroutineID, level, msg string, keyvals []interf
 	return
 }
 
-func (log *giLogger) genLogTextEx(goroutineID, level, fmtStr string, vals []interface{}) (logText string) {
+func (log *giLogger) genLogTextEx(strTime, goroutineID, level, fmtStr string, vals []interface{}) (logText string) {
 	if goroutineID != "" {
 		logText = fmt.Sprintf(
 			"%v[%v][%-5v][%5s] ",
-			time.Now().UTC().Format(DATETIMEFORMAT),
+			strTime,
 			log.timeZone,
 			level,
 			goroutineID)
 	} else {
 		logText = fmt.Sprintf(
 			"%v[%v][%-5v] ",
-			time.Now().UTC().Format(DATETIMEFORMAT),
+			strTime,
 			log.timeZone,
 			level)
 	}
@@ -366,13 +370,17 @@ func (log *giLogger) flushMutex(logBuf *bytes.Buffer) {
 
 func asyncRun(log *giLogger) {
 	for {
-		if len(log.cf) > 0 {
+		lenChan := len(log.cf)
+		if lenChan > 0 {
+			if lenChan == lengthOfChanLogInfoBuffer {
+				print("log buffer full!!!\n")
+			}
 			logBuf := bytes.NewBuffer(nil)
 			logText := ""
 			if li := <-log.cf; li.fmt == false {
-				logText = log.genLogText(li.goroutineID, li.level, li.msg, li.keyvals)
+				logText = log.genLogText(li.time, li.goroutineID, li.level, li.msg, li.keyvals)
 			} else {
-				logText = log.genLogTextEx(li.goroutineID, li.level, li.fmtStr, li.vals)
+				logText = log.genLogTextEx(li.time, li.goroutineID, li.level, li.fmtStr, li.vals)
 			}
 			logBuf.WriteString(logText)
 			log.flush(logBuf)
@@ -388,11 +396,13 @@ func asyncRun(log *giLogger) {
 
 // Log a message at specific level.
 func (log *giLogger) Log(level, msg string, keyvals ...interface{}) {
+	strTime := time.Now().UTC().Format(DATETIMEFORMAT)
 	if log.isOutputAsync {
-		li := &logInfo{
+		li := logInfo{
+			time:  strTime,
 			level: level,
 			fmt:   false,
-			msg:   file_line() + msg,
+			msg:   fileLine() + msg,
 		}
 		if log.withThreadID {
 			li.goroutineID = GetGID()
@@ -404,13 +414,21 @@ func (log *giLogger) Log(level, msg string, keyvals ...interface{}) {
 		if log.withThreadID {
 			rid = GetGID()
 		}
-		logText := log.genLogText(rid, level, file_line()+msg, keyvals)
+		logText := log.genLogText(strTime, rid, level, fileLine()+msg, keyvals)
 		log.flushMutex(bytes.NewBuffer([]byte(logText)))
 	}
 }
 
-func file_line() string {
+func fileLine() string {
 	_, fileName, fileLine, ok := runtime.Caller(3)
+
+	// tendermint 有一层 filter ，调用栈深一层
+	exe, _ := os.Executable()
+	exeName := filepath.Base(exe)
+	if exeName == "tendermint" || exeName == "tmcore" {
+		_, fileName, fileLine, ok = runtime.Caller(4)
+	}
+
 	var s string
 	if ok {
 		f := strings.Split(fileName, "/")
@@ -423,11 +441,13 @@ func file_line() string {
 
 // Log a message at specific level.
 func (log *giLogger) LogEx(level, fmtStr string, vals ...interface{}) {
+	strTime := time.Now().UTC().Format(DATETIMEFORMAT)
 	if log.isOutputAsync {
-		li := &logInfo{
+		li := logInfo{
+			time:   strTime,
 			level:  level,
 			fmt:    true,
-			fmtStr: file_line() + fmtStr,
+			fmtStr: fileLine() + fmtStr,
 			vals:   vals,
 		}
 		if log.withThreadID {
@@ -439,7 +459,7 @@ func (log *giLogger) LogEx(level, fmtStr string, vals ...interface{}) {
 		if log.withThreadID {
 			rid = GetGID()
 		}
-		logText := log.genLogTextEx(rid, level, file_line()+fmtStr, vals)
+		logText := log.genLogTextEx(strTime, rid, level, fileLine()+fmtStr, vals)
 		log.flushMutex(bytes.NewBuffer([]byte(logText)))
 	}
 }
@@ -455,9 +475,9 @@ func (log *giLogger) Flush() {
 			if len(log.cf) > 0 {
 				logText := ""
 				if li := <-log.cf; li.fmt == false {
-					logText = log.genLogText(li.goroutineID, li.level, li.msg, li.keyvals)
+					logText = log.genLogText(li.time, li.goroutineID, li.level, li.msg, li.keyvals)
 				} else {
-					logText = log.genLogTextEx(li.goroutineID, li.level, li.fmtStr, li.vals)
+					logText = log.genLogTextEx(li.time, li.goroutineID, li.level, li.fmtStr, li.vals)
 				}
 				logBuf.WriteString(logText)
 			} else {

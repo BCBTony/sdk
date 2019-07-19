@@ -1,8 +1,8 @@
 package mydonation
 
 import (
-	"blockchain/smcsdk/sdk/bn"
 	"blockchain/smcsdk/sdk/types"
+	"blockchain/smcsdk/sdk/bn"
 )
 
 var _ receipt = (*Mydonation)(nil)
@@ -68,3 +68,5 @@ func (m *Mydonation) emitTransferDonation(donee types.Address, value, balance bn
 		},
 	)
 }
+        
+                         
